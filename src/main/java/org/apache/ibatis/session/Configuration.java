@@ -1,5 +1,5 @@
-/*
- *    Copyright 2009-2014 the original author or authors.
+/**
+ *    Copyright 2009-2018 the original author or authors.
  *
  *    Licensed under the Apache License, Version 2.0 (the "License");
  *    you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -27,6 +28,7 @@ import java.util.Set;
 
 import org.apache.ibatis.binding.MapperRegistry;
 import org.apache.ibatis.builder.CacheRefResolver;
+import org.apache.ibatis.builder.IncompleteElementException;
 import org.apache.ibatis.builder.ResultMapResolver;
 import org.apache.ibatis.builder.annotation.MethodResolver;
 import org.apache.ibatis.builder.xml.XMLStatementBuilder;
@@ -53,6 +55,7 @@ import org.apache.ibatis.executor.resultset.DefaultResultSetHandler;
 import org.apache.ibatis.executor.resultset.ResultSetHandler;
 import org.apache.ibatis.executor.statement.RoutingStatementHandler;
 import org.apache.ibatis.executor.statement.StatementHandler;
+import org.apache.ibatis.io.VFS;
 import org.apache.ibatis.logging.Log;
 import org.apache.ibatis.logging.LogFactory;
 import org.apache.ibatis.logging.commons.JakartaCommonsLoggingImpl;
@@ -71,7 +74,9 @@ import org.apache.ibatis.mapping.VendorDatabaseIdProvider;
 import org.apache.ibatis.parsing.XNode;
 import org.apache.ibatis.plugin.Interceptor;
 import org.apache.ibatis.plugin.InterceptorChain;
+import org.apache.ibatis.reflection.DefaultReflectorFactory;
 import org.apache.ibatis.reflection.MetaObject;
+import org.apache.ibatis.reflection.ReflectorFactory;
 import org.apache.ibatis.reflection.factory.DefaultObjectFactory;
 import org.apache.ibatis.reflection.factory.ObjectFactory;
 import org.apache.ibatis.reflection.wrapper.DefaultObjectWrapperFactory;
@@ -85,6 +90,7 @@ import org.apache.ibatis.transaction.jdbc.JdbcTransactionFactory;
 import org.apache.ibatis.transaction.managed.ManagedTransactionFactory;
 import org.apache.ibatis.type.JdbcType;
 import org.apache.ibatis.type.TypeAliasRegistry;
+import org.apache.ibatis.type.TypeHandler;
 import org.apache.ibatis.type.TypeHandlerRegistry;
 
 /**
@@ -94,29 +100,34 @@ public class Configuration {
 
   protected Environment environment;
 
-  protected boolean safeRowBoundsEnabled = false;
+  protected boolean safeRowBoundsEnabled;
   protected boolean safeResultHandlerEnabled = true;
-  protected boolean mapUnderscoreToCamelCase = false;
-  protected boolean aggressiveLazyLoading = true;
+  protected boolean mapUnderscoreToCamelCase;
+  protected boolean aggressiveLazyLoading;
   protected boolean multipleResultSetsEnabled = true;
-  protected boolean useGeneratedKeys = false;
+  protected boolean useGeneratedKeys;
   protected boolean useColumnLabel = true;
   protected boolean cacheEnabled = true;
-  protected boolean callSettersOnNulls = false;
-  
+  protected boolean callSettersOnNulls;
+  protected boolean useActualParamName = true;
+  protected boolean returnInstanceForEmptyRow;
+
   protected String logPrefix;
   protected Class <? extends Log> logImpl;
+  protected Class <? extends VFS> vfsImpl;
   protected LocalCacheScope localCacheScope = LocalCacheScope.SESSION;
   protected JdbcType jdbcTypeForNull = JdbcType.OTHER;
-  protected Set<String> lazyLoadTriggerMethods = new HashSet<String>(Arrays.asList(new String[] { "equals", "clone", "hashCode", "toString" }));
+  protected Set<String> lazyLoadTriggerMethods = new HashSet<>(Arrays.asList("equals", "clone", "hashCode", "toString"));
   protected Integer defaultStatementTimeout;
+  protected Integer defaultFetchSize;
   protected ExecutorType defaultExecutorType = ExecutorType.SIMPLE;
   protected AutoMappingBehavior autoMappingBehavior = AutoMappingBehavior.PARTIAL;
+  protected AutoMappingUnknownColumnBehavior autoMappingUnknownColumnBehavior = AutoMappingUnknownColumnBehavior.NONE;
 
   protected Properties variables = new Properties();
+  protected ReflectorFactory reflectorFactory = new DefaultReflectorFactory();
   protected ObjectFactory objectFactory = new DefaultObjectFactory();
   protected ObjectWrapperFactory objectWrapperFactory = new DefaultObjectWrapperFactory();
-  protected MapperRegistry mapperRegistry = new MapperRegistry(this);
 
   protected boolean lazyLoadingEnabled = false;
   protected ProxyFactory proxyFactory = new JavassistProxyFactory(); // #224 Using internal Javassist instead of OGNL
@@ -126,35 +137,36 @@ public class Configuration {
    * Configuration factory class.
    * Used to create Configuration for loading deserialized unread properties.
    *
-   * @see <a href='https://code.google.com/p/mybatis/issues/detail?id=300'>Issue 300</a> (google code)
+   * @see <a href='https://code.google.com/p/mybatis/issues/detail?id=300'>Issue 300 (google code)</a>
    */
   protected Class<?> configurationFactory;
 
+  protected final MapperRegistry mapperRegistry = new MapperRegistry(this);
   protected final InterceptorChain interceptorChain = new InterceptorChain();
   protected final TypeHandlerRegistry typeHandlerRegistry = new TypeHandlerRegistry();
   protected final TypeAliasRegistry typeAliasRegistry = new TypeAliasRegistry();
   protected final LanguageDriverRegistry languageRegistry = new LanguageDriverRegistry();
 
-  protected final Map<String, MappedStatement> mappedStatements = new StrictMap<MappedStatement>("Mapped Statements collection");
-  protected final Map<String, Cache> caches = new StrictMap<Cache>("Caches collection");
-  protected final Map<String, ResultMap> resultMaps = new StrictMap<ResultMap>("Result Maps collection");
-  protected final Map<String, ParameterMap> parameterMaps = new StrictMap<ParameterMap>("Parameter Maps collection");
-  protected final Map<String, KeyGenerator> keyGenerators = new StrictMap<KeyGenerator>("Key Generators collection");
+  protected final Map<String, MappedStatement> mappedStatements = new StrictMap<>("Mapped Statements collection");
+  protected final Map<String, Cache> caches = new StrictMap<>("Caches collection");
+  protected final Map<String, ResultMap> resultMaps = new StrictMap<>("Result Maps collection");
+  protected final Map<String, ParameterMap> parameterMaps = new StrictMap<>("Parameter Maps collection");
+  protected final Map<String, KeyGenerator> keyGenerators = new StrictMap<>("Key Generators collection");
 
-  protected final Set<String> loadedResources = new HashSet<String>();
-  protected final Map<String, XNode> sqlFragments = new StrictMap<XNode>("XML fragments parsed from previous mappers");
+  protected final Set<String> loadedResources = new HashSet<>();
+  protected final Map<String, XNode> sqlFragments = new StrictMap<>("XML fragments parsed from previous mappers");
 
-  protected final Collection<XMLStatementBuilder> incompleteStatements = new LinkedList<XMLStatementBuilder>();
-  protected final Collection<CacheRefResolver> incompleteCacheRefs = new LinkedList<CacheRefResolver>();
-  protected final Collection<ResultMapResolver> incompleteResultMaps = new LinkedList<ResultMapResolver>();
-  protected final Collection<MethodResolver> incompleteMethods = new LinkedList<MethodResolver>();
+  protected final Collection<XMLStatementBuilder> incompleteStatements = new LinkedList<>();
+  protected final Collection<CacheRefResolver> incompleteCacheRefs = new LinkedList<>();
+  protected final Collection<ResultMapResolver> incompleteResultMaps = new LinkedList<>();
+  protected final Collection<MethodResolver> incompleteMethods = new LinkedList<>();
 
   /*
    * A map holds cache-ref relationship. The key is the namespace that
    * references a cache bound to another namespace and the value is the
    * namespace which the actual cache is bound to.
    */
-  protected final Map<String, String> cacheRefMap = new HashMap<String, String>();
+  protected final Map<String, String> cacheRefMap = new HashMap<>();
 
   public Configuration(Environment environment) {
     this();
@@ -207,11 +219,21 @@ public class Configuration {
     return logImpl;
   }
 
-  @SuppressWarnings("unchecked")
-  public void setLogImpl(Class<?> logImpl) {
+  public void setLogImpl(Class<? extends Log> logImpl) {
     if (logImpl != null) {
-      this.logImpl = (Class<? extends Log>) logImpl;
+      this.logImpl = logImpl;
       LogFactory.useCustomLogging(this.logImpl);
+    }
+  }
+
+  public Class<? extends VFS> getVfsImpl() {
+    return this.vfsImpl;
+  }
+
+  public void setVfsImpl(Class<? extends VFS> vfsImpl) {
+    if (vfsImpl != null) {
+      this.vfsImpl = vfsImpl;
+      VFS.addImplClass(this.vfsImpl);
     }
   }
 
@@ -221,6 +243,22 @@ public class Configuration {
 
   public void setCallSettersOnNulls(boolean callSettersOnNulls) {
     this.callSettersOnNulls = callSettersOnNulls;
+  }
+
+  public boolean isUseActualParamName() {
+    return useActualParamName;
+  }
+
+  public void setUseActualParamName(boolean useActualParamName) {
+    this.useActualParamName = useActualParamName;
+  }
+
+  public boolean isReturnInstanceForEmptyRow() {
+    return returnInstanceForEmptyRow;
+  }
+
+  public void setReturnInstanceForEmptyRow(boolean returnEmptyInstance) {
+    this.returnInstanceForEmptyRow = returnEmptyInstance;
   }
 
   public String getDatabaseId() {
@@ -285,6 +323,20 @@ public class Configuration {
 
   public void setAutoMappingBehavior(AutoMappingBehavior autoMappingBehavior) {
     this.autoMappingBehavior = autoMappingBehavior;
+  }
+
+  /**
+   * @since 3.4.0
+   */
+  public AutoMappingUnknownColumnBehavior getAutoMappingUnknownColumnBehavior() {
+    return autoMappingUnknownColumnBehavior;
+  }
+
+  /**
+   * @since 3.4.0
+   */
+  public void setAutoMappingUnknownColumnBehavior(AutoMappingUnknownColumnBehavior autoMappingUnknownColumnBehavior) {
+    this.autoMappingUnknownColumnBehavior = autoMappingUnknownColumnBehavior;
   }
 
   public boolean isLazyLoadingEnabled() {
@@ -362,6 +414,20 @@ public class Configuration {
     this.defaultStatementTimeout = defaultStatementTimeout;
   }
 
+  /**
+   * @since 3.3.0
+   */
+  public Integer getDefaultFetchSize() {
+    return defaultFetchSize;
+  }
+
+  /**
+   * @since 3.3.0
+   */
+  public void setDefaultFetchSize(Integer defaultFetchSize) {
+    this.defaultFetchSize = defaultFetchSize;
+  }
+
   public boolean isUseColumnLabel() {
     return useColumnLabel;
   }
@@ -398,6 +464,18 @@ public class Configuration {
     return typeHandlerRegistry;
   }
 
+  /**
+   * Set a default {@link TypeHandler} class for {@link Enum}.
+   * A default {@link TypeHandler} is {@link org.apache.ibatis.type.EnumTypeHandler}.
+   * @param typeHandler a type handler class for {@link Enum}
+   * @since 3.4.5
+   */
+  public void setDefaultEnumTypeHandler(Class<? extends TypeHandler> typeHandler) {
+    if (typeHandler != null) {
+      getTypeHandlerRegistry().setDefaultEnumTypeHandler(typeHandler);
+    }
+  }
+
   public TypeAliasRegistry getTypeAliasRegistry() {
     return typeAliasRegistry;
   }
@@ -407,6 +485,14 @@ public class Configuration {
    */
   public MapperRegistry getMapperRegistry() {
     return mapperRegistry;
+  }
+
+  public ReflectorFactory getReflectorFactory() {
+	  return reflectorFactory;
+  }
+
+  public void setReflectorFactory(ReflectorFactory reflectorFactory) {
+	  this.reflectorFactory = reflectorFactory;
   }
 
   public ObjectFactory getObjectFactory() {
@@ -436,19 +522,25 @@ public class Configuration {
     return languageRegistry;
   }
 
-  public void setDefaultScriptingLanguage(Class<?> driver) {
+  public void setDefaultScriptingLanguage(Class<? extends LanguageDriver> driver) {
     if (driver == null) {
       driver = XMLLanguageDriver.class;
     }
     getLanguageRegistry().setDefaultDriverClass(driver);
   }
 
-  public LanguageDriver getDefaultScriptingLanuageInstance() {
+  public LanguageDriver getDefaultScriptingLanguageInstance() {
     return languageRegistry.getDefaultDriver();
   }
 
+  /** @deprecated Use {@link #getDefaultScriptingLanguageInstance()} */
+  @Deprecated
+  public LanguageDriver getDefaultScriptingLanuageInstance() {
+    return getDefaultScriptingLanguageInstance();
+  }
+
   public MetaObject newMetaObject(Object object) {
-    return MetaObject.forObject(object, objectFactory, objectWrapperFactory);
+    return MetaObject.forObject(object, objectFactory, objectWrapperFactory, reflectorFactory);
   }
 
   public ParameterHandler newParameterHandler(MappedStatement mappedStatement, Object parameterObject, BoundSql boundSql) {
@@ -673,35 +765,60 @@ public class Configuration {
   public void addCacheRef(String namespace, String referencedNamespace) {
     cacheRefMap.put(namespace, referencedNamespace);
   }
-  
+
   /*
    * Parses all the unprocessed statement nodes in the cache. It is recommended
    * to call this method once all the mappers are added as it provides fail-fast
    * statement validation.
    */
   protected void buildAllStatements() {
-    if (!incompleteResultMaps.isEmpty()) {
-      synchronized (incompleteResultMaps) {
-        // This always throws a BuilderException.
-        incompleteResultMaps.iterator().next().resolve();
-      }
-    }
+    parsePendingResultMaps();
     if (!incompleteCacheRefs.isEmpty()) {
       synchronized (incompleteCacheRefs) {
-        // This always throws a BuilderException.
-        incompleteCacheRefs.iterator().next().resolveCacheRef();
+        incompleteCacheRefs.removeIf(x -> x.resolveCacheRef() != null);
       }
     }
     if (!incompleteStatements.isEmpty()) {
       synchronized (incompleteStatements) {
-        // This always throws a BuilderException.
-        incompleteStatements.iterator().next().parseStatementNode();
+        incompleteStatements.removeIf(x -> {
+          x.parseStatementNode();
+          return true;
+        });
       }
     }
     if (!incompleteMethods.isEmpty()) {
       synchronized (incompleteMethods) {
-        // This always throws a BuilderException.
-        incompleteMethods.iterator().next().resolve();
+        incompleteMethods.removeIf(x -> {
+          x.resolve();
+          return true;
+        });
+      }
+    }
+  }
+
+  private void parsePendingResultMaps() {
+    if (incompleteResultMaps.isEmpty()) {
+      return;
+    }
+    synchronized (incompleteResultMaps) {
+      boolean resolved;
+      IncompleteElementException ex = null;
+      do {
+        resolved = false;
+        Iterator<ResultMapResolver> iterator = incompleteResultMaps.iterator();
+        while (iterator.hasNext()) {
+          try {
+            iterator.next().resolve();
+            iterator.remove();
+            resolved = true;
+          } catch (IncompleteElementException e) {
+            ex = e;
+          }
+        }
+      } while (resolved);
+      if (!incompleteResultMaps.isEmpty() && ex != null) {
+        // At least one result map is unresolvable. 
+        throw ex;
       }
     }
   }
@@ -754,7 +871,7 @@ public class Configuration {
   protected static class StrictMap<V> extends HashMap<String, V> {
 
     private static final long serialVersionUID = -4950446264854982944L;
-    private String name;
+    private final String name;
 
     public StrictMap(String name, int initialCapacity, float loadFactor) {
       super(initialCapacity, loadFactor);
@@ -805,12 +922,12 @@ public class Configuration {
     }
 
     private String getShortName(String key) {
-      final String[] keyparts = key.split("\\.");
-      return keyparts[keyparts.length - 1];
+      final String[] keyParts = key.split("\\.");
+      return keyParts[keyParts.length - 1];
     }
 
     protected static class Ambiguity {
-      private String subject;
+      final private String subject;
 
       public Ambiguity(String subject) {
         this.subject = subject;
